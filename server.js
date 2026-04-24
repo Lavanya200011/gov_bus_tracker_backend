@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -8,12 +9,12 @@ const server = http.createServer(app);
 
 // 1. --- MONGODB CONFIGURATION ---
 // Replace 'YOUR_MONGODB_CONNECTION_STRING' with your actual Atlas string
-const mongoURI = 'mongodb+srv://lavanyathawkar11_db:Lavanyath@cluster0.nol8utr.mongodb.net/?appName=Cluster0';
+const mongoURI =process.env.MONGO_URI;
 
 mongoose.connect(mongoURI)
   .then(() => {
     console.log("📦 Connected to MongoDB Atlas");
-    seedRoutes(); // Initialize database with some routes if empty
+    // seedRoutes(); // Initialize database with some routes if empty
   })
   .catch(err => console.error("❌ MongoDB Error:", err));
 
