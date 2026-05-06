@@ -77,7 +77,11 @@ const io = new Server(server, {
   transports: ["websocket"],
 });
 
-// Live tracking memory: { socketId: { routeId, label, socketId, lastLocation } }
+const DEFAULT_BROADCAST_DURATION_MS = 60 * 60 * 1000;
+const MIN_BROADCAST_DURATION_MS = 60 * 1000;
+const MAX_BROADCAST_DURATION_MS = 12 * 60 * 60 * 1000;
+
+// Live tracking memory: { socketId: { routeId, label, socketId, lastLocation, expiresAt, timeoutId } }
 const activeBuses = {};
 
 function isRouteLive(routeId) {
@@ -89,20 +93,72 @@ function emitBusStatus(eventName, bus, isLive) {
     routeId: bus.routeId,
     label: bus.label,
     isLive,
+    expiresAt: bus.expiresAt,
   });
 }
 
-function removeBus(socket) {
+function getBusExpiry(data) {
+  const now = Date.now();
+  const requestedExpiresAt = Number(data?.expiresAt);
+  const requestedDurationMinutes = Number(data?.durationMinutes);
+  let expiresAt = now + DEFAULT_BROADCAST_DURATION_MS;
+
+  if (Number.isFinite(requestedExpiresAt) && requestedExpiresAt > now) {
+    expiresAt = requestedExpiresAt;
+  } else if (
+    Number.isFinite(requestedDurationMinutes) &&
+    requestedDurationMinutes > 0
+  ) {
+    expiresAt = now + requestedDurationMinutes * 60 * 1000;
+  }
+
+  const durationMs = Math.min(
+    Math.max(expiresAt - now, MIN_BROADCAST_DURATION_MS),
+    MAX_BROADCAST_DURATION_MS,
+  );
+
+  return now + durationMs;
+}
+
+function clearBusTimer(bus) {
+  if (bus?.timeoutId) {
+    clearTimeout(bus.timeoutId);
+    bus.timeoutId = null;
+  }
+}
+
+function scheduleBusExpiry(socket, bus) {
+  clearBusTimer(bus);
+
+  bus.timeoutId = setTimeout(() => {
+    const currentBus = activeBuses[socket.id];
+
+    if (!currentBus || currentBus.expiresAt !== bus.expiresAt) {
+      return;
+    }
+
+    socket.emit("bus_timer_expired", {
+      routeId: currentBus.routeId,
+      label: currentBus.label,
+      expiresAt: currentBus.expiresAt,
+    });
+
+    removeBus(socket, "expired");
+  }, Math.max(bus.expiresAt - Date.now(), 0));
+}
+
+function removeBus(socket, reason = "manual") {
   const bus = activeBuses[socket.id];
 
   if (!bus) {
     return;
   }
 
+  clearBusTimer(bus);
   delete activeBuses[socket.id];
   socket.leave(bus.routeId);
 
-  console.log(`Bus ${bus.routeId} offline`);
+  console.log(`Bus ${bus.routeId} offline (${reason})`);
 
   if (!isRouteLive(bus.routeId)) {
     emitBusStatus("bus_offline", bus, false);
@@ -143,6 +199,8 @@ io.on("connection", (socket) => {
 
     if (previousBus && previousBus.routeId !== routeId) {
       removeBus(socket);
+    } else if (previousBus) {
+      clearBusTimer(previousBus);
     }
 
     const wasRouteLive = isRouteLive(routeId);
@@ -151,10 +209,22 @@ io.on("connection", (socket) => {
       label,
       socketId: socket.id,
       lastLocation: previousBus?.lastLocation ?? null,
+      expiresAt: getBusExpiry(data),
+      timeoutId: null,
     };
+    scheduleBusExpiry(socket, activeBuses[socket.id]);
     socket.join(routeId);
 
-    console.log(`Bus Registered: Route ${routeId} (${label})`);
+    console.log(
+      `Bus Registered: Route ${routeId} (${label}) until ${new Date(
+        activeBuses[socket.id].expiresAt,
+      ).toISOString()}`,
+    );
+    socket.emit("bus_registered", {
+      routeId,
+      label,
+      expiresAt: activeBuses[socket.id].expiresAt,
+    });
 
     if (!wasRouteLive) {
       emitBusStatus("bus_online", activeBuses[socket.id], true);
